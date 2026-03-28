@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
 import * as acpManagerModule from "../acp/control-plane/manager.js";
 import { AcpRuntimeError } from "../acp/runtime/errors.js";
+import * as acpDelegationPromptModule from "../agents/acp-delegation-prompt.js";
 import * as embeddedModule from "../agents/pi-embedded.js";
 import type { OpenClawConfig } from "../config/config.js";
 import * as configModule from "../config/config.js";
@@ -15,6 +16,7 @@ import { agentCommand } from "./agent.js";
 const loadConfigSpy = vi.spyOn(configModule, "loadConfig");
 const runEmbeddedPiAgentSpy = vi.spyOn(embeddedModule, "runEmbeddedPiAgent");
 const getAcpSessionManagerSpy = vi.spyOn(acpManagerModule, "getAcpSessionManager");
+const buildAcpDelegationPromptSpy = vi.spyOn(acpDelegationPromptModule, "buildAcpDelegationPrompt");
 
 const runtime: RuntimeEnv = {
   log: vi.fn(),
@@ -321,6 +323,28 @@ describe("agentCommand ACP runtime routing", () => {
     });
   });
 
+  it("persists ACP skills snapshots to the session store", async () => {
+    await withAcpSessionEnvInfo(async ({ storePath }) => {
+      await runAcpTurnWithTextDeltas({ chunks: ["ACP_", "OK"] });
+
+      const persistedStore = JSON.parse(fs.readFileSync(storePath, "utf-8")) as Record<
+        string,
+        {
+          skillsSnapshot?: {
+            prompt: string;
+            skills: unknown[];
+          };
+        }
+      >;
+      expect(persistedStore["agent:codex:acp:test"]?.skillsSnapshot).toEqual(
+        expect.objectContaining({
+          prompt: expect.any(String),
+          skills: expect.any(Array),
+        }),
+      );
+    });
+  });
+
   it("preserves exact ACP transcript text without trimming whitespace", async () => {
     await withAcpSessionEnvInfo(async ({ storePath }) => {
       await runAcpTurnWithTextDeltas({
@@ -453,6 +477,29 @@ describe("agentCommand ACP runtime routing", () => {
     await runAcpSessionWithPolicyOverrides({ acpOverrides });
   });
 
+  it("fails ACP policy checks before building the delegation prompt", async () => {
+    await withTempHome(async (home) => {
+      const storePath = path.join(home, "sessions.json");
+      writeAcpSessionStore(storePath);
+      mockConfigWithAcpOverrides(home, storePath, {
+        dispatch: { enabled: false },
+      });
+
+      const runTurn = vi.fn(async (_params: unknown) => {});
+      mockAcpManager({
+        runTurn: (params: unknown) => runTurn(params),
+      });
+
+      await expect(
+        agentCommand({ message: "ping", sessionKey: "agent:codex:acp:test" }, runtime),
+      ).rejects.toMatchObject({
+        code: "ACP_DISPATCH_DISABLED",
+      });
+      expect(buildAcpDelegationPromptSpy).not.toHaveBeenCalled();
+      expect(runTurn).not.toHaveBeenCalled();
+    });
+  });
+
   it("blocks ACP turns when ACP agent is disallowed by policy", async () => {
     await withTempHome(async (home) => {
       const storePath = path.join(home, "sessions.json");
@@ -481,6 +528,8 @@ describe("agentCommand ACP runtime routing", () => {
   it("allows ACP turns for kimi when policy allowlists kimi", async () => {
     await withTempHome(async (home) => {
       const storePath = path.join(home, "sessions.json");
+      const sessionKey = "agent:kimi:acp:test";
+      const expectedAgent = sessionKey.split(":")[1] ?? "kimi";
       writeAcpSessionStore(storePath, "kimi");
       mockConfigWithAcpOverrides(home, storePath, {
         allowedAgents: ["kimi"],
@@ -492,12 +541,12 @@ describe("agentCommand ACP runtime routing", () => {
         resolveSession: ({ sessionKey }) => resolveReadySession(sessionKey, "kimi"),
       });
 
-      await agentCommand({ message: "ping", sessionKey: "agent:kimi:acp:test" }, runtime);
+      await agentCommand({ message: "ping", sessionKey }, runtime);
 
       expect(runTurn).toHaveBeenCalledWith(
         expect.objectContaining({
-          sessionKey: "agent:kimi:acp:test",
-          text: expect.stringContaining("Target agent: kimi"),
+          sessionKey,
+          text: expect.stringContaining(`Target agent: ${expectedAgent}`),
         }),
       );
       expect(runEmbeddedPiAgentSpy).not.toHaveBeenCalled();

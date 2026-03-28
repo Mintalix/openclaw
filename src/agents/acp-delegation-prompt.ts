@@ -1,8 +1,10 @@
+import syncFs from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "../config/config.js";
 import type { SessionEntry } from "../config/sessions.js";
+import { openBoundaryFile } from "../infra/boundary-file-read.js";
 import { getRemoteSkillEligibility } from "../infra/skills-remote.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveAgentSkillsFilter } from "./agent-scope.js";
@@ -16,6 +18,7 @@ import {
 } from "./skills.js";
 import { getSkillsSnapshotVersion } from "./skills/refresh.js";
 import { buildSystemPromptParams } from "./system-prompt-params.js";
+import { DEFAULT_MEMORY_ALT_FILENAME, DEFAULT_MEMORY_FILENAME } from "./workspace.js";
 
 const log = createSubsystemLogger("agents/acp-delegation-prompt");
 const DEFAULT_MEMORY_RESULTS = 3;
@@ -181,7 +184,13 @@ async function resolveRelevantMemory(
     const files = await collectWorkspaceMemoryFiles(params.workspaceDir);
     const snippets: WorkspaceMemorySnippet[] = [];
     for (const filePath of files) {
-      const content = await fs.readFile(filePath, "utf8").catch(() => "");
+      const content = await readWorkspaceMemoryFile({
+        workspaceDir: params.workspaceDir,
+        filePath,
+      });
+      if (!content) {
+        continue;
+      }
       const snippet = buildMemorySnippet({
         workspaceDir: params.workspaceDir,
         filePath,
@@ -244,7 +253,7 @@ function formatMemoryResults(results: WorkspaceMemorySnippet[]): string {
   }
   return results
     .map((result) => {
-      const snippet = result.snippet.trim().slice(0, MAX_MEMORY_SNIPPET_CHARS);
+      const snippet = result.snippet.trim();
       return [
         `- ${result.path}:${String(result.startLine)}-${String(result.endLine)} (score ${result.score.toFixed(2)})`,
         snippet,
@@ -265,9 +274,12 @@ function formatContextFiles(files: EmbeddedContextFile[]): string {
 
 async function collectWorkspaceMemoryFiles(workspaceDir: string): Promise<string[]> {
   const candidates: string[] = [];
-  const rootMemoryFile = path.join(workspaceDir, "MEMORY.md");
-  if (await fileExists(rootMemoryFile)) {
-    candidates.push(rootMemoryFile);
+  for (const name of [DEFAULT_MEMORY_FILENAME, DEFAULT_MEMORY_ALT_FILENAME] as const) {
+    const rootMemoryFile = path.join(workspaceDir, name);
+    if (await fileExists(rootMemoryFile)) {
+      candidates.push(rootMemoryFile);
+      break;
+    }
   }
 
   const memoryDir = path.join(workspaceDir, "memory");
@@ -297,12 +309,13 @@ function buildMemorySnippet(params: {
   content: string;
   queryTerms: string[];
 }): WorkspaceMemorySnippet | null {
-  const trimmed = params.content.trim();
+  const rawContent = params.content;
+  const trimmed = rawContent.trim();
   if (!trimmed) {
     return null;
   }
 
-  const lines = trimmed.split(/\r?\n/);
+  const lines = rawContent.split(/\r?\n/);
   let bestScore = 0;
   let bestLineIndex = -1;
 
@@ -360,5 +373,26 @@ async function fileExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readWorkspaceMemoryFile(params: {
+  workspaceDir: string;
+  filePath: string;
+}): Promise<string | null> {
+  const opened = await openBoundaryFile({
+    absolutePath: params.filePath,
+    rootPath: params.workspaceDir,
+    boundaryLabel: "workspace root",
+  });
+  if (!opened.ok) {
+    return null;
+  }
+  try {
+    return syncFs.readFileSync(opened.fd, "utf8");
+  } catch {
+    return null;
+  } finally {
+    syncFs.closeSync(opened.fd);
   }
 }

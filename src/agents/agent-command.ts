@@ -298,30 +298,9 @@ async function prepareAgentCommandExecution(
         sessionKey,
       })
     : null;
-  const acpPromptBody =
-    acpResolution?.kind === "ready" && sessionKey
-      ? (
-          await buildAcpDelegationPrompt({
-            cfg,
-            sessionId,
-            sessionKey,
-            sessionEntry: sessionEntryRaw,
-            agentId: sessionAgentId,
-            delegateAgent: normalizeAgentId(
-              acpResolution.meta.agent || resolveAgentIdFromSessionKey(sessionKey),
-            ),
-            workspaceDir,
-            userBody,
-            memoryQuery: message,
-            extraSystemPrompt: opts.extraSystemPrompt,
-          })
-        ).prompt
-      : userBody;
 
   return {
-    body: userBody,
     userBody,
-    acpPromptBody,
     cfg,
     normalizedSpawned,
     agentCfg,
@@ -354,9 +333,7 @@ async function agentCommandInternal(
 ) {
   const prepared = await prepareAgentCommandExecution(opts, runtime);
   const {
-    body,
     userBody,
-    acpPromptBody,
     cfg,
     normalizedSpawned,
     agentCfg,
@@ -419,6 +396,39 @@ async function agentCommandInternal(
         const agentPolicyError = resolveAcpAgentPolicyError(cfg, acpAgent);
         if (agentPolicyError) {
           throw agentPolicyError;
+        }
+
+        const needsSkillsSnapshot = isNewSession || !sessionEntry?.skillsSnapshot;
+        const { prompt: acpPromptBody, skillsSnapshot } = await buildAcpDelegationPrompt({
+          cfg,
+          sessionId,
+          sessionKey,
+          sessionEntry,
+          agentId: sessionAgentId,
+          delegateAgent: acpAgent,
+          workspaceDir,
+          userBody,
+          memoryQuery: opts.message ?? "",
+          extraSystemPrompt: opts.extraSystemPrompt,
+        });
+        if (skillsSnapshot && sessionStore && storePath && needsSkillsSnapshot) {
+          const current = sessionEntry ?? {
+            sessionId,
+            updatedAt: Date.now(),
+          };
+          const next: SessionEntry = {
+            ...current,
+            sessionId,
+            updatedAt: Date.now(),
+            skillsSnapshot,
+          };
+          await persistSessionEntry({
+            sessionStore,
+            sessionKey,
+            storePath,
+            entry: next,
+          });
+          sessionEntry = next;
         }
 
         await acpManager.runTurn({
@@ -793,7 +803,7 @@ async function agentCommandInternal(
             sessionAgentId,
             sessionFile,
             workspaceDir,
-            body,
+            body: userBody,
             isFallbackRetry,
             resolvedThinkLevel,
             timeoutMs,
