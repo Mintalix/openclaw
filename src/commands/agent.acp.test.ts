@@ -266,18 +266,47 @@ describe("agentCommand ACP runtime routing", () => {
     await withAcpSessionEnv(async () => {
       const { runTurn } = await runAcpTurnWithTextDeltas({ chunks: ["ACP_", "OK"] });
 
+      const promptText = (runTurn.mock.calls[0]?.[0] as { text?: string } | undefined)?.text ?? "";
       expect(runTurn).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionKey: "agent:codex:acp:test",
-          text: "ping",
+          text: expect.any(String),
           mode: "prompt",
         }),
       );
+      expect(promptText).toContain("ACP-delegated coding agent");
+      expect(promptText).toContain("Target agent: codex");
+      expect(promptText).toContain("Agent id: codex");
+      expect(promptText).toContain("# User Request\nping");
       expect(runEmbeddedPiAgentSpy).not.toHaveBeenCalled();
       const hasAckLog = vi
         .mocked(runtime.log)
         .mock.calls.some(([first]) => typeof first === "string" && first.includes("ACP_OK"));
       expect(hasAckLog).toBe(true);
+    });
+  });
+
+  it("injects extra OpenClaw instructions into the ACP delegation prompt", async () => {
+    await withAcpSessionEnv(async () => {
+      const runTurn = createRunTurnFromTextDeltas(["ACP_", "OK"]);
+      mockAcpManager({
+        runTurn: (input: unknown) => runTurn(input),
+      });
+
+      await agentCommand(
+        {
+          message: "ping",
+          sessionKey: "agent:codex:acp:test",
+          extraSystemPrompt: "Stay within src/ unless the change clearly requires another path.",
+        },
+        runtime,
+      );
+
+      const promptText = (runTurn.mock.calls[0]?.[0] as { text?: string } | undefined)?.text ?? "";
+      expect(promptText).toContain("# Additional OpenClaw Instructions");
+      expect(promptText).toContain(
+        "Stay within src/ unless the change clearly requires another path.",
+      );
     });
   });
 
@@ -468,7 +497,7 @@ describe("agentCommand ACP runtime routing", () => {
       expect(runTurn).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionKey: "agent:kimi:acp:test",
-          text: "ping",
+          text: expect.stringContaining("Target agent: kimi"),
         }),
       );
       expect(runEmbeddedPiAgentSpy).not.toHaveBeenCalled();

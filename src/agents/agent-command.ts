@@ -36,6 +36,7 @@ import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js
 import { resolveSendPolicy } from "../sessions/send-policy.js";
 import { sanitizeForLog } from "../terminal/ansi.js";
 import { resolveMessageChannel } from "../utils/message-channel.js";
+import { buildAcpDelegationPrompt } from "./acp-delegation-prompt.js";
 import {
   listAgentIds,
   resolveAgentDir,
@@ -159,7 +160,7 @@ async function prepareAgentCommandExecution(
   if (!message.trim()) {
     throw new Error("Message (--message) is required");
   }
-  const body = prependInternalEventContext(message, opts.internalEvents);
+  const userBody = prependInternalEventContext(message, opts.internalEvents);
   if (!opts.to && !opts.sessionId && !opts.sessionKey && !opts.agentId) {
     throw new Error("Pass --to <E.164>, --session-id, or --agent to choose a session");
   }
@@ -297,9 +298,30 @@ async function prepareAgentCommandExecution(
         sessionKey,
       })
     : null;
+  const acpPromptBody =
+    acpResolution?.kind === "ready" && sessionKey
+      ? (
+          await buildAcpDelegationPrompt({
+            cfg,
+            sessionId,
+            sessionKey,
+            sessionEntry: sessionEntryRaw,
+            agentId: sessionAgentId,
+            delegateAgent: normalizeAgentId(
+              acpResolution.meta.agent || resolveAgentIdFromSessionKey(sessionKey),
+            ),
+            workspaceDir,
+            userBody,
+            memoryQuery: message,
+            extraSystemPrompt: opts.extraSystemPrompt,
+          })
+        ).prompt
+      : userBody;
 
   return {
-    body,
+    body: userBody,
+    userBody,
+    acpPromptBody,
     cfg,
     normalizedSpawned,
     agentCfg,
@@ -333,6 +355,8 @@ async function agentCommandInternal(
   const prepared = await prepareAgentCommandExecution(opts, runtime);
   const {
     body,
+    userBody,
+    acpPromptBody,
     cfg,
     normalizedSpawned,
     agentCfg,
@@ -400,7 +424,7 @@ async function agentCommandInternal(
         await acpManager.runTurn({
           cfg,
           sessionKey,
-          text: body,
+          text: acpPromptBody,
           mode: "prompt",
           requestId: runId,
           signal: opts.abortSignal,
@@ -448,7 +472,7 @@ async function agentCommandInternal(
       const finalText = visibleTextAccumulator.finalize();
       try {
         sessionEntry = await persistAcpTurnTranscript({
-          body,
+          body: userBody,
           finalText: finalTextRaw,
           sessionId,
           sessionKey,
