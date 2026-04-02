@@ -114,9 +114,7 @@ export function createSessionsSendTool(opts?: {
       });
 
       const sessionKeyParam = readStringParam(params, "sessionKey");
-      const labelParam = sessionKeyParam
-        ? undefined
-        : readStringParam(params, "label")?.trim() || undefined;
+      const labelParam = sessionKeyParam ? undefined : readStringParam(params, "label")?.trim() || undefined;
       const labelAgentIdParam = readStringParam(params, "agentId")?.trim() || undefined;
 
       let sessionKey = sessionKeyParam;
