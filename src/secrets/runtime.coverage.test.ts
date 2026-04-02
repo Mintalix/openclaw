@@ -3,6 +3,7 @@ import type { AuthProfileStore } from "../agents/auth-profiles.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { PluginWebSearchProviderEntry } from "../plugins/types.js";
 import { getPath, setPathCreateStrict } from "./path-utils.js";
+import { canonicalizeSecretTargetCoverageId } from "./target-registry-test-helpers.js";
 import { listSecretTargetRegistryEntries } from "./target-registry.js";
 
 type SecretRegistryEntry = ReturnType<typeof listSecretTargetRegistryEntries>[number];
@@ -112,6 +113,10 @@ function resolveCoverageEnvId(entry: SecretRegistryEntry, fallbackEnvId: string)
     : fallbackEnvId;
 }
 
+function resolveCoverageResolvedPath(entry: SecretRegistryEntry): string {
+  return canonicalizeSecretTargetCoverageId(entry.id);
+}
+
 function buildConfigForOpenClawTarget(entry: SecretRegistryEntry, envId: string): OpenClawConfig {
   const config = {} as OpenClawConfig;
   const resolvedEnvId = resolveCoverageEnvId(entry, envId);
@@ -198,9 +203,6 @@ function buildConfigForOpenClawTarget(entry: SecretRegistryEntry, envId: string)
   if (entry.id === "plugins.entries.tavily.config.webSearch.apiKey") {
     setPathCreateStrict(config, ["tools", "web", "search", "provider"], "tavily");
   }
-  if (entry.id === "tools.web.x_search.apiKey") {
-    setPathCreateStrict(config, ["tools", "web", "x_search", "enabled"], true);
-  }
   return config;
 }
 
@@ -265,7 +267,10 @@ describe("secrets runtime target coverage", () => {
         agentDirs: ["/tmp/openclaw-agent-main"],
         loadAuthStore: () => ({ version: 1, profiles: {} }),
       });
-      const resolved = getPath(snapshot.config, toConcretePathSegments(entry.pathPattern));
+      const resolved = getPath(
+        snapshot.config,
+        toConcretePathSegments(resolveCoverageResolvedPath(entry)),
+      );
       if (entry.expectedResolvedValue === "string") {
         expect(resolved).toBe(expectedValue);
       } else {
