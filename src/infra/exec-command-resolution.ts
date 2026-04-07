@@ -3,8 +3,10 @@ import path from "node:path";
 import { matchesExecAllowlistPattern } from "./exec-allowlist-pattern.js";
 import type { ExecAllowlistEntry } from "./exec-approvals.js";
 import { resolveExecWrapperTrustPlan } from "./exec-wrapper-trust-plan.js";
-import { resolveExecutablePath as resolveExecutableCandidatePath } from "./executable-path.js";
-import { expandHomePrefix } from "./home-dir.js";
+import {
+  resolveExecutablePath as resolveExecutableCandidatePath,
+  resolveExecutablePathCandidate,
+} from "./executable-path.js";
 
 export type ExecutableResolution = {
   rawExecutable: string;
@@ -175,15 +177,10 @@ function resolveExecutableCandidatePathFromResolution(
   if (!raw) {
     return undefined;
   }
-  const expanded = raw.startsWith("~") ? expandHomePrefix(raw) : raw;
-  if (!expanded.includes("/") && !expanded.includes("\\")) {
-    return undefined;
-  }
-  if (path.isAbsolute(expanded)) {
-    return expanded;
-  }
-  const base = cwd && cwd.trim() ? cwd.trim() : process.cwd();
-  return path.resolve(base, expanded);
+  return resolveExecutablePathCandidate(raw, {
+    cwd,
+    requirePathSeparator: true,
+  });
 }
 
 export function resolveExecutionTargetResolution(
@@ -253,7 +250,6 @@ const TRAILING_SHELL_REDIRECTIONS_RE = /\s+(?:[12]>&[12]|[12]>\/dev\/null)\s*$/;
 
 function stripTrailingRedirections(value: string): string {
   let prev = value;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const next = prev.replace(TRAILING_SHELL_REDIRECTIONS_RE, "");
     if (next === prev) {

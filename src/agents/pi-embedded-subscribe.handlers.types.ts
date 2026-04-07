@@ -10,20 +10,12 @@ import type {
   BlockReplyChunking,
   SubscribeEmbeddedPiSessionParams,
 } from "./pi-embedded-subscribe.types.js";
+import type { ToolErrorSummary } from "./tool-error-summary.js";
 import type { NormalizedUsage } from "./usage.js";
 
 export type EmbeddedSubscribeLogger = {
   debug: (message: string, meta?: Record<string, unknown>) => void;
   warn: (message: string, meta?: Record<string, unknown>) => void;
-};
-
-export type ToolErrorSummary = {
-  toolName: string;
-  meta?: string;
-  error?: string;
-  timedOut?: boolean;
-  mutatingAction?: boolean;
-  actionFingerprint?: string;
 };
 
 export type ToolCallSummary = {
@@ -37,6 +29,9 @@ export type EmbeddedPiSubscribeState = {
   toolMetas: Array<{ toolName?: string; meta?: string }>;
   toolMetaById: Map<string, ToolCallSummary>;
   toolSummaryById: Set<string>;
+  itemActiveIds: Set<string>;
+  itemStartedCount: number;
+  itemCompletedCount: number;
   lastToolError?: ToolErrorSummary;
 
   blockReplyBreak: "text_end" | "message_end";
@@ -145,6 +140,7 @@ export type ToolHandlerParams = Pick<
   | "sessionKey"
   | "sessionId"
   | "agentId"
+  | "toolResultFormat"
 >;
 
 export type ToolHandlerState = Pick<
@@ -152,6 +148,9 @@ export type ToolHandlerState = Pick<
   | "toolMetaById"
   | "toolMetas"
   | "toolSummaryById"
+  | "itemActiveIds"
+  | "itemStartedCount"
+  | "itemCompletedCount"
   | "lastToolError"
   | "pendingMessagingTargets"
   | "pendingMessagingTexts"

@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
+import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
-  getTaskFlowRegistryHooks,
+  getTaskFlowRegistryObservers,
   getTaskFlowRegistryStore,
   resetTaskFlowRegistryRuntimeForTests,
-  type TaskFlowRegistryHookEvent,
+  type TaskFlowRegistryObserverEvent,
 } from "./task-flow-registry.store.js";
 import type {
   TaskFlowRecord,
@@ -118,15 +119,15 @@ function snapshotFlowRecords(source: ReadonlyMap<string, TaskFlowRecord>): TaskF
   return [...source.values()].map((record) => cloneFlowRecord(record));
 }
 
-function emitFlowRegistryHookEvent(createEvent: () => TaskFlowRegistryHookEvent): void {
-  const hooks = getTaskFlowRegistryHooks();
-  if (!hooks?.onEvent) {
+function emitFlowRegistryObserverEvent(createEvent: () => TaskFlowRegistryObserverEvent): void {
+  const observers = getTaskFlowRegistryObservers();
+  if (!observers?.onEvent) {
     return;
   }
   try {
-    hooks.onEvent(createEvent());
+    observers.onEvent(createEvent());
   } catch {
-    // Flow hooks are observational. They must not break registry writes.
+    // Flow observers are best-effort only. They must not break registry writes.
   }
 }
 
@@ -212,11 +213,11 @@ function ensureFlowRegistryReady() {
     restoreFailureMessage = null;
   } catch (error) {
     flows.clear();
-    restoreFailureMessage = error instanceof Error ? error.message : String(error);
+    restoreFailureMessage = formatErrorMessage(error);
     log.warn("Failed to restore task-flow registry", { error });
     return;
   }
-  emitFlowRegistryHookEvent(() => ({
+  emitFlowRegistryObserverEvent(() => ({
     kind: "restored",
     flows: snapshotFlowRecords(flows),
   }));
@@ -339,7 +340,7 @@ function applyFlowPatch(current: TaskFlowRecord, patch: FlowRecordPatch): TaskFl
 function writeFlowRecord(next: TaskFlowRecord, previous?: TaskFlowRecord): TaskFlowRecord {
   flows.set(next.flowId, next);
   persistFlowUpsert(next);
-  emitFlowRegistryHookEvent(() => ({
+  emitFlowRegistryObserverEvent(() => ({
     kind: "upserted",
     flow: cloneFlowRecord(next),
     ...(previous ? { previous: cloneFlowRecord(previous) } : {}),
@@ -695,7 +696,7 @@ export function deleteTaskFlowRecordById(flowId: string): boolean {
   }
   flows.delete(flowId);
   persistFlowDelete(flowId);
-  emitFlowRegistryHookEvent(() => ({
+  emitFlowRegistryObserverEvent(() => ({
     kind: "deleted",
     flowId,
     previous: cloneFlowRecord(current),
