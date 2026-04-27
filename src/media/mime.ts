@@ -1,12 +1,8 @@
 import path from "node:path";
 import { type MediaKind, mediaKindFromMime } from "./constants.js";
 
-let fileTypeModulePromise: Promise<typeof import("file-type")> | undefined;
-
-function loadFileTypeModule(): Promise<typeof import("file-type")> {
-  fileTypeModulePromise ??= import("file-type");
-  return fileTypeModulePromise;
-}
+/** @internal */
+export const FILE_TYPE_SNIFF_MAX_BYTES = 1024 * 1024;
 
 // Map common mimes to preferred file extensions.
 const EXT_BY_MIME: Record<string, string> = {
@@ -54,7 +50,7 @@ const MIME_BY_EXT: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".js": "text/javascript",
   ".htm": "text/html",
-  ".xml": "text/xml", // pin text/xml as canonical (application/xml also maps to .xml in EXT_BY_MIME)
+  ".xml": "text/xml",
 };
 
 const AUDIO_FILE_EXTENSIONS = new Set([
@@ -69,6 +65,8 @@ const AUDIO_FILE_EXTENSIONS = new Set([
   ".wav",
 ]);
 
+let fileTypeModulePromise: Promise<typeof import("file-type")> | undefined;
+
 export function normalizeMimeType(mime?: string | null): string | undefined {
   if (!mime) {
     return undefined;
@@ -77,13 +75,22 @@ export function normalizeMimeType(mime?: string | null): string | undefined {
   return cleaned || undefined;
 }
 
+/** @internal */
+export function sliceMimeSniffBuffer(buffer: Buffer): Buffer {
+  if (buffer.byteLength <= FILE_TYPE_SNIFF_MAX_BYTES) {
+    return buffer;
+  }
+  return buffer.subarray(0, FILE_TYPE_SNIFF_MAX_BYTES);
+}
+
 async function sniffMime(buffer?: Buffer): Promise<string | undefined> {
   if (!buffer) {
     return undefined;
   }
   try {
-    const { fileTypeFromBuffer } = await loadFileTypeModule();
-    const type = await fileTypeFromBuffer(buffer);
+    fileTypeModulePromise ??= import("file-type");
+    const { fileTypeFromBuffer } = await fileTypeModulePromise;
+    const type = await fileTypeFromBuffer(sliceMimeSniffBuffer(buffer));
     return type?.mime ?? undefined;
   } catch {
     return undefined;
@@ -104,6 +111,14 @@ export function getFileExtension(filePath?: string | null): string | undefined {
   }
   const ext = path.extname(filePath).toLowerCase();
   return ext || undefined;
+}
+
+export function mimeTypeFromFilePath(filePath?: string | null): string | undefined {
+  const ext = getFileExtension(filePath);
+  if (!ext) {
+    return undefined;
+  }
+  return MIME_BY_EXT[ext];
 }
 
 export function isAudioFileName(fileName?: string | null): boolean {

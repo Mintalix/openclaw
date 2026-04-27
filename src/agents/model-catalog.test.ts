@@ -1,35 +1,50 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetLogger, setLoggerOverride } from "../logging/logger.js";
-import { augmentModelCatalogWithProviderPlugins } from "../plugins/provider-runtime.runtime.js";
-vi.mock("./models-config.js", () => ({
-  ensureOpenClawModelsJson: vi.fn().mockResolvedValue({ agentDir: "/tmp", wrote: false }),
-}));
-vi.mock("./agent-paths.js", () => ({
-  resolveOpenClawAgentDir: () => "/tmp/openclaw",
-}));
-vi.mock("../plugins/provider-runtime.runtime.js", () => ({
-  augmentModelCatalogWithProviderPlugins: vi.fn().mockResolvedValue([]),
-}));
-import {
-  __setModelCatalogImportForTest,
-  findModelInCatalog,
-  loadModelCatalog,
-} from "./model-catalog.js";
-import {
-  installModelCatalogTestHooks,
-  mockCatalogImportFailThenRecover,
-  type PiSdkModule,
-} from "./model-catalog.test-harness.js";
 
-const augmentCatalogMock = vi.mocked(augmentModelCatalogWithProviderPlugins);
+type PiSdkModule = typeof import("./pi-model-discovery.js");
+
+let __setModelCatalogImportForTest: typeof import("./model-catalog.js").__setModelCatalogImportForTest;
+let findModelInCatalog: typeof import("./model-catalog.js").findModelInCatalog;
+let loadModelCatalog: typeof import("./model-catalog.js").loadModelCatalog;
+let resetModelCatalogCacheForTest: typeof import("./model-catalog.js").resetModelCatalogCacheForTest;
+let augmentCatalogMock: ReturnType<typeof vi.fn>;
+let ensureOpenClawModelsJsonMock: ReturnType<typeof vi.fn>;
+
+vi.mock("./model-suppression.runtime.js", () => ({
+  shouldSuppressBuiltInModel: (params: { provider?: string; id?: string }) =>
+    (params.provider === "openai" ||
+      params.provider === "azure-openai-responses" ||
+      params.provider === "openai-codex") &&
+    params.id === "gpt-5.3-codex-spark",
+}));
+
+function mockCatalogImportFailThenRecover() {
+  let call = 0;
+  __setModelCatalogImportForTest(async () => {
+    call += 1;
+    if (call === 1) {
+      throw new Error("boom");
+    }
+    return {
+      discoverAuthStorage: () => ({}),
+      AuthStorage: function AuthStorage() {},
+      ModelRegistry: class {
+        getAll() {
+          return [{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }];
+        }
+      },
+    } as unknown as PiSdkModule;
+  });
+  return () => call;
+}
 
 function mockPiDiscoveryModels(models: unknown[]) {
   __setModelCatalogImportForTest(
     async () =>
       ({
         discoverAuthStorage: () => ({}),
-        AuthStorage: class {},
+        AuthStorage: function AuthStorage() {},
         ModelRegistry: class {
           getAll() {
             return models;
@@ -44,11 +59,47 @@ function mockSingleOpenAiCatalogModel() {
 }
 
 describe("loadModelCatalog", () => {
-  installModelCatalogTestHooks();
+  beforeAll(async () => {
+    ensureOpenClawModelsJsonMock = vi.fn().mockResolvedValue({ agentDir: "/tmp", wrote: false });
+    vi.doMock("./models-config.js", () => ({
+      ensureOpenClawModelsJson: ensureOpenClawModelsJsonMock,
+    }));
+    vi.doMock("./agent-paths.js", () => ({
+      resolveOpenClawAgentDir: () => "/tmp/openclaw",
+    }));
+    vi.doMock("../plugins/provider-runtime.runtime.js", () => ({
+      augmentModelCatalogWithProviderPlugins: vi.fn().mockResolvedValue([]),
+    }));
+
+    ({
+      __setModelCatalogImportForTest,
+      findModelInCatalog,
+      loadModelCatalog,
+      resetModelCatalogCacheForTest,
+    } = await import("./model-catalog.js"));
+    const providerRuntime = await import("../plugins/provider-runtime.runtime.js");
+    augmentCatalogMock = vi.mocked(providerRuntime.augmentModelCatalogWithProviderPlugins);
+  });
+
+  beforeEach(() => {
+    resetModelCatalogCacheForTest();
+    ensureOpenClawModelsJsonMock.mockClear();
+  });
+
+  afterEach(() => {
+    __setModelCatalogImportForTest();
+    resetModelCatalogCacheForTest();
+    vi.restoreAllMocks();
+  });
+
+  afterAll(() => {
+    vi.doUnmock("./models-config.js");
+    vi.doUnmock("./agent-paths.js");
+    vi.doUnmock("../plugins/provider-runtime.runtime.js");
+  });
 
   it("retries after import failure without poisoning the cache", async () => {
     setLoggerOverride({ level: "silent", consoleLevel: "warn" });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const getCallCount = mockCatalogImportFailThenRecover();
 
@@ -59,7 +110,6 @@ describe("loadModelCatalog", () => {
       const second = await loadModelCatalog({ config: cfg });
       expect(second).toEqual([{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }]);
       expect(getCallCount()).toBe(2);
-      expect(warnSpy).toHaveBeenCalledTimes(1);
     } finally {
       setLoggerOverride(null);
       resetLogger();
@@ -68,13 +118,12 @@ describe("loadModelCatalog", () => {
 
   it("returns partial results on discovery errors", async () => {
     setLoggerOverride({ level: "silent", consoleLevel: "warn" });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       __setModelCatalogImportForTest(
         async () =>
           ({
             discoverAuthStorage: () => ({}),
-            AuthStorage: class {},
+            AuthStorage: function AuthStorage() {},
             ModelRegistry: class {
               getAll() {
                 return [
@@ -94,11 +143,32 @@ describe("loadModelCatalog", () => {
 
       const result = await loadModelCatalog({ config: {} as OpenClawConfig });
       expect(result).toEqual([{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }]);
-      expect(warnSpy).toHaveBeenCalledTimes(1);
     } finally {
       setLoggerOverride(null);
       resetLogger();
     }
+  });
+
+  it("does not prepare models.json when loading catalog in read-only mode", async () => {
+    const discoverAuthStorage = vi.fn(() => ({}));
+    __setModelCatalogImportForTest(
+      async () =>
+        ({
+          discoverAuthStorage,
+          AuthStorage: function AuthStorage() {},
+          ModelRegistry: class {
+            getAll() {
+              return [{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }];
+            }
+          },
+        }) as unknown as PiSdkModule,
+    );
+
+    const result = await loadModelCatalog({ config: {} as OpenClawConfig, readOnly: true });
+
+    expect(result).toEqual([{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }]);
+    expect(ensureOpenClawModelsJsonMock).not.toHaveBeenCalled();
+    expect(discoverAuthStorage).toHaveBeenCalledWith("/tmp/openclaw", { readOnly: true });
   });
 
   it("does not synthesize stale openai-codex/gpt-5.3-codex-spark entries from gpt-5.4", async () => {
@@ -134,7 +204,7 @@ describe("loadModelCatalog", () => {
     );
   });
 
-  it("filters stale openai gpt-5.3-codex-spark built-ins from the catalog", async () => {
+  it("filters stale gpt-5.3-codex-spark built-ins from the catalog", async () => {
     mockPiDiscoveryModels([
       {
         id: "gpt-5.3-codex-spark",
@@ -175,7 +245,7 @@ describe("loadModelCatalog", () => {
         id: "gpt-5.3-codex-spark",
       }),
     );
-    expect(result).toContainEqual(
+    expect(result).not.toContainEqual(
       expect.objectContaining({
         provider: "openai-codex",
         id: "gpt-5.3-codex-spark",

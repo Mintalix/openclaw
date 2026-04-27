@@ -1,6 +1,7 @@
-import type { OpenClawConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSecretInputRef } from "../config/types.secrets.js";
-import { resolveManifestContractOwnerPluginId } from "../plugins/manifest-registry.js";
+import { createLazyRuntimeNamedExport } from "../shared/lazy-runtime.js";
+import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 import type {
   ResolverContext,
   SecretDefaults,
@@ -10,6 +11,11 @@ import { pushInactiveSurfaceWarning, pushWarning } from "./runtime-shared.js";
 import type { RuntimeWebDiagnostic, RuntimeWebDiagnosticCode } from "./runtime-web-tools.types.js";
 export { isRecord } from "./shared.js";
 import { isRecord } from "./shared.js";
+
+const loadResolveManifestContractOwnerPluginId = createLazyRuntimeNamedExport(
+  () => import("./runtime-web-tools-manifest.runtime.js"),
+  "resolveManifestContractOwnerPluginId",
+);
 
 type RuntimeWebWarningCode = Extract<RuntimeWebDiagnosticCode, SecretResolverWarningCode>;
 export type SecretResolutionResult<TSource extends string> = {
@@ -78,6 +84,38 @@ export type RuntimeWebProviderSelectionParams<
   }) => Promise<void>;
 };
 
+function pushInactiveProviderCredentialWarnings<
+  TProvider extends { id: string; requiresCredential?: boolean },
+  TToolConfig extends Record<string, unknown> | undefined,
+  TSource extends string,
+  TMetadata extends RuntimeWebProviderMetadataBase<TSource>,
+>(params: {
+  selection: RuntimeWebProviderSelectionParams<TProvider, TToolConfig, TSource, TMetadata>;
+  skipProviderId?: string;
+  details: string;
+}): void {
+  for (const provider of params.selection.providers) {
+    if (provider.id === params.skipProviderId) {
+      continue;
+    }
+    const value = params.selection.readConfiguredCredential({
+      provider,
+      config: params.selection.sourceConfig,
+      toolConfig: params.selection.toolConfig,
+    });
+    if (!params.selection.hasConfiguredSecretRef(value, params.selection.defaults)) {
+      continue;
+    }
+    for (const path of params.selection.inactivePathsForProvider(provider)) {
+      pushInactiveSurfaceWarning({
+        context: params.selection.context,
+        path,
+        details: params.details,
+      });
+    }
+  }
+}
+
 export function ensureObject(
   target: Record<string, unknown>,
   key: string,
@@ -91,14 +129,14 @@ export function ensureObject(
   return next;
 }
 
-export function normalizeKnownProvider<TProvider extends { id: string }>(
+export function normalizeKnownProvider(
   value: unknown,
-  providers: TProvider[],
+  providers: Array<{ id: string }>,
 ): string | undefined {
-  if (typeof value !== "string") {
+  const normalized = normalizeOptionalLowercaseString(value);
+  if (!normalized) {
     return undefined;
   }
-  const normalized = value.trim().toLowerCase();
   if (providers.some((provider) => provider.id === normalized)) {
     return normalized;
   }
@@ -140,6 +178,7 @@ export type ResolveRuntimeWebProviderSurfaceParams<
   invalidAutoDetectCode: RuntimeWebWarningCode;
   sourceConfig: OpenClawConfig;
   context: ResolverContext;
+  configuredBundledPluginIdHint?: string;
   resolveProviders: (params: { configuredBundledPluginId?: string }) => Promise<TProvider[]>;
   sortProviders: (providers: TProvider[]) => TProvider[];
   readConfiguredCredential: (params: {
@@ -161,19 +200,45 @@ export async function resolveRuntimeWebProviderSurface<
 >(
   params: ResolveRuntimeWebProviderSurfaceParams<TProvider, TToolConfig>,
 ): Promise<RuntimeWebProviderSurface<TProvider>> {
-  const configuredBundledPluginId = resolveManifestContractOwnerPluginId({
-    contract: params.contract,
-    value: params.rawProvider,
-    origin: "bundled",
-    config: params.sourceConfig,
-    env: { ...process.env, ...params.context.env },
-  });
-
-  const allProviders = params.sortProviders(
+  let configuredBundledPluginId = params.configuredBundledPluginIdHint;
+  if (!configuredBundledPluginId && params.rawProvider) {
+    const resolveManifestContractOwnerPluginId = await loadResolveManifestContractOwnerPluginId();
+    configuredBundledPluginId = resolveManifestContractOwnerPluginId({
+      contract: params.contract,
+      value: params.rawProvider,
+      origin: "bundled",
+      config: params.sourceConfig,
+      env: { ...process.env, ...params.context.env },
+    });
+  }
+  let allProviders = params.sortProviders(
     await params.resolveProviders({
       configuredBundledPluginId,
     }),
   );
+  if (
+    params.rawProvider &&
+    params.configuredBundledPluginIdHint &&
+    configuredBundledPluginId &&
+    !allProviders.some((provider) => provider.id === params.rawProvider)
+  ) {
+    configuredBundledPluginId = undefined;
+  }
+  if (params.rawProvider && !configuredBundledPluginId) {
+    const resolveManifestContractOwnerPluginId = await loadResolveManifestContractOwnerPluginId();
+    configuredBundledPluginId = resolveManifestContractOwnerPluginId({
+      contract: params.contract,
+      value: params.rawProvider,
+      origin: "bundled",
+      config: params.sourceConfig,
+      env: { ...process.env, ...params.context.env },
+    });
+    allProviders = params.sortProviders(
+      await params.resolveProviders({
+        configuredBundledPluginId,
+      }),
+    );
+  }
   const hasConfiguredSurface =
     Boolean(params.toolConfig) ||
     allProviders.some((provider) => {
@@ -397,66 +462,23 @@ export async function resolveRuntimeWebProviderSelection<
   }
 
   if (params.enabled && !params.configuredProvider && params.metadata.selectedProvider) {
-    for (const provider of params.providers) {
-      if (provider.id === params.metadata.selectedProvider) {
-        continue;
-      }
-      const value = params.readConfiguredCredential({
-        provider,
-        config: params.sourceConfig,
-        toolConfig: params.toolConfig,
-      });
-      if (!params.hasConfiguredSecretRef(value, params.defaults)) {
-        continue;
-      }
-      for (const path of params.inactivePathsForProvider(provider)) {
-        pushInactiveSurfaceWarning({
-          context: params.context,
-          path,
-          details: `${params.scopePath} auto-detected provider is "${params.metadata.selectedProvider}".`,
-        });
-      }
-    }
+    pushInactiveProviderCredentialWarnings({
+      selection: params,
+      skipProviderId: params.metadata.selectedProvider,
+      details: `${params.scopePath} auto-detected provider is "${params.metadata.selectedProvider}".`,
+    });
   } else if (params.toolConfig && !params.enabled) {
-    for (const provider of params.providers) {
-      const value = params.readConfiguredCredential({
-        provider,
-        config: params.sourceConfig,
-        toolConfig: params.toolConfig,
-      });
-      if (!params.hasConfiguredSecretRef(value, params.defaults)) {
-        continue;
-      }
-      for (const path of params.inactivePathsForProvider(provider)) {
-        pushInactiveSurfaceWarning({
-          context: params.context,
-          path,
-          details: `${params.scopePath} is disabled.`,
-        });
-      }
-    }
+    pushInactiveProviderCredentialWarnings({
+      selection: params,
+      details: `${params.scopePath} is disabled.`,
+    });
   }
 
   if (params.enabled && params.toolConfig && params.configuredProvider) {
-    for (const provider of params.providers) {
-      if (provider.id === params.configuredProvider) {
-        continue;
-      }
-      const value = params.readConfiguredCredential({
-        provider,
-        config: params.sourceConfig,
-        toolConfig: params.toolConfig,
-      });
-      if (!params.hasConfiguredSecretRef(value, params.defaults)) {
-        continue;
-      }
-      for (const path of params.inactivePathsForProvider(provider)) {
-        pushInactiveSurfaceWarning({
-          context: params.context,
-          path,
-          details: `${params.scopePath}.provider is "${params.configuredProvider}".`,
-        });
-      }
-    }
+    pushInactiveProviderCredentialWarnings({
+      selection: params,
+      skipProviderId: params.configuredProvider,
+      details: `${params.scopePath}.provider is "${params.configuredProvider}".`,
+    });
   }
 }

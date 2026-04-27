@@ -6,6 +6,8 @@ import { withTempDir } from "../test-helpers/temp-dir.js";
 import {
   downloadClawHubPackageArchive,
   downloadClawHubSkillArchive,
+  normalizeClawHubSha256Integrity,
+  normalizeClawHubSha256Hex,
   parseClawHubPluginSpec,
   resolveClawHubAuthToken,
   resolveLatestVersionFromPackage,
@@ -40,6 +42,15 @@ describe("clawhub helpers", () => {
       name: "demo",
       version: "1.2.3",
     });
+    expect(parseClawHubPluginSpec("clawhub:@scope/pkg")).toEqual({
+      name: "@scope/pkg",
+    });
+    expect(parseClawHubPluginSpec("clawhub:@scope/pkg@1.2.3")).toEqual({
+      name: "@scope/pkg",
+      version: "1.2.3",
+    });
+    expect(parseClawHubPluginSpec("clawhub:demo@")).toBeNull();
+    expect(parseClawHubPluginSpec("clawhub:@scope/pkg@")).toBeNull();
     expect(parseClawHubPluginSpec("@scope/pkg")).toBeNull();
   });
 
@@ -85,11 +96,49 @@ describe("clawhub helpers", () => {
     expect(satisfiesPluginApiRange("invalid", "^1.2.0")).toBe(false);
   });
 
+  it.each(["*", "x", "X", "=*", "=x", ">=*", ">=x", "<=*", "^*", "~*"] as const)(
+    "accepts plugin api wildcard range %s for valid runtime versions",
+    (range) => {
+      expect(satisfiesPluginApiRange("2026.3.24", range)).toBe(true);
+      expect(satisfiesPluginApiRange("1.0.0", range)).toBe(true);
+    },
+  );
+
+  it("keeps wildcard plugin api ranges intersected with concrete comparators", () => {
+    expect(satisfiesPluginApiRange("2026.3.24", "* >=2026.3.22")).toBe(true);
+    expect(satisfiesPluginApiRange("2026.3.21", "* >=2026.3.22")).toBe(false);
+    expect(satisfiesPluginApiRange("2026.3.24", "x <2026.3.24")).toBe(false);
+  });
+
+  it("rejects invalid runtime versions and impossible wildcard comparators", () => {
+    expect(satisfiesPluginApiRange("invalid", "*")).toBe(false);
+    expect(satisfiesPluginApiRange("2026.3.24", ">*")).toBe(false);
+    expect(satisfiesPluginApiRange("2026.3.24", "<*")).toBe(false);
+  });
+
   it("checks min gateway versions with loose host labels", () => {
     expect(satisfiesGatewayMinimum("2026.3.22", "2026.3.0")).toBe(true);
     expect(satisfiesGatewayMinimum("OpenClaw 2026.3.22", "2026.3.0")).toBe(true);
     expect(satisfiesGatewayMinimum("2026.2.9", "2026.3.0")).toBe(false);
     expect(satisfiesGatewayMinimum("unknown", "2026.3.0")).toBe(false);
+  });
+
+  it("normalizes raw ClawHub SHA-256 hashes into integrity strings", () => {
+    const hex = "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81";
+    const integrity = "sha256-A5BYxvLAy0ksUzsKTRTvd8wPeKvMztUofYShogEc+4E=";
+    const unpaddedIntegrity = "sha256-A5BYxvLAy0ksUzsKTRTvd8wPeKvMztUofYShogEc+4E";
+    expect(normalizeClawHubSha256Integrity(hex)).toBe(integrity);
+    expect(normalizeClawHubSha256Integrity(`sha256:${hex}`)).toBe(integrity);
+    expect(normalizeClawHubSha256Integrity(integrity)).toBe(integrity);
+    expect(normalizeClawHubSha256Integrity(unpaddedIntegrity)).toBe(integrity);
+    expect(normalizeClawHubSha256Integrity(`sha256=${hex}`)).toBeNull();
+    expect(normalizeClawHubSha256Integrity("sha256-a=")).toBeNull();
+    expect(normalizeClawHubSha256Integrity("not-a-hash")).toBeNull();
+  });
+
+  it("normalizes ClawHub SHA-256 hex values", () => {
+    expect(normalizeClawHubSha256Hex("AA".repeat(32))).toBe("aa".repeat(32));
+    expect(normalizeClawHubSha256Hex("not-a-hash")).toBeNull();
   });
 
   it("resolves ClawHub auth token from config.json", async () => {

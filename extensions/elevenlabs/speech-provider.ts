@@ -1,3 +1,5 @@
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { assertOkOrThrowProviderError } from "openclaw/plugin-sdk/provider-http";
 import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
 import type {
   SpeechDirectiveTokenParseContext,
@@ -16,6 +18,11 @@ import {
   requireInRange,
   trimToUndefined,
 } from "openclaw/plugin-sdk/speech";
+import {
+  fetchWithSsrFGuard,
+  ssrfPolicyFromHttpBaseUrlAllowedHostname,
+} from "openclaw/plugin-sdk/ssrf-runtime";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import { resolveElevenLabsApiKeyWithProfileFallback } from "./config-api.js";
 import { isValidElevenLabsVoiceId, normalizeElevenLabsBaseUrl } from "./shared.js";
 import { elevenLabsTTS } from "./tts.js";
@@ -30,6 +37,7 @@ const DEFAULT_ELEVENLABS_VOICE_SETTINGS = {
 };
 
 const ELEVENLABS_TTS_MODELS = [
+  "eleven_v3",
   "eleven_multilingual_v2",
   "eleven_turbo_v2_5",
   "eleven_monolingual_v1",
@@ -53,7 +61,7 @@ type ElevenLabsProviderConfig = {
 };
 
 function parseBooleanValue(value: string): boolean | undefined {
-  const normalized = value.trim().toLowerCase();
+  const normalized = normalizeLowercaseStringOrEmpty(value);
   if (["true", "1", "yes", "on"].includes(normalized)) {
     return true;
   }
@@ -281,7 +289,7 @@ function parseDirectiveToken(ctx: SpeechDirectiveTokenParseContext) {
   } catch (error) {
     return {
       handled: true,
-      warnings: [error instanceof Error ? error.message : String(error)],
+      warnings: [formatErrorMessage(error)],
     };
   }
 }
@@ -290,32 +298,40 @@ export async function listElevenLabsVoices(params: {
   apiKey: string;
   baseUrl?: string;
 }): Promise<SpeechVoiceOption[]> {
-  const res = await fetch(`${normalizeElevenLabsBaseUrl(params.baseUrl)}/v1/voices`, {
-    headers: {
-      "xi-api-key": params.apiKey,
+  const normalizedBaseUrl = normalizeElevenLabsBaseUrl(params.baseUrl);
+  const { response, release } = await fetchWithSsrFGuard({
+    url: `${normalizedBaseUrl}/v1/voices`,
+    init: {
+      headers: {
+        "xi-api-key": params.apiKey,
+      },
     },
+    policy: ssrfPolicyFromHttpBaseUrlAllowedHostname(normalizedBaseUrl),
+    auditContext: "elevenlabs.voices",
   });
-  if (!res.ok) {
-    throw new Error(`ElevenLabs voices API error (${res.status})`);
+  try {
+    await assertOkOrThrowProviderError(response, "ElevenLabs voices API error");
+    const json = (await response.json()) as {
+      voices?: Array<{
+        voice_id?: string;
+        name?: string;
+        category?: string;
+        description?: string;
+      }>;
+    };
+    return Array.isArray(json.voices)
+      ? json.voices
+          .map((voice) => ({
+            id: voice.voice_id?.trim() ?? "",
+            name: trimToUndefined(voice.name),
+            category: trimToUndefined(voice.category),
+            description: trimToUndefined(voice.description),
+          }))
+          .filter((voice) => voice.id.length > 0)
+      : [];
+  } finally {
+    await release();
   }
-  const json = (await res.json()) as {
-    voices?: Array<{
-      voice_id?: string;
-      name?: string;
-      category?: string;
-      description?: string;
-    }>;
-  };
-  return Array.isArray(json.voices)
-    ? json.voices
-        .map((voice) => ({
-          id: voice.voice_id?.trim() ?? "",
-          name: voice.name?.trim() || undefined,
-          category: voice.category?.trim() || undefined,
-          description: voice.description?.trim() || undefined,
-        }))
-        .filter((voice) => voice.id.length > 0)
-    : [];
 }
 
 export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
@@ -385,7 +401,7 @@ export function buildElevenLabsSpeechProvider(): SpeechProviderPlugin {
     },
     resolveTalkOverrides: ({ params }) => {
       const normalize = trimToUndefined(params.normalize);
-      const language = trimToUndefined(params.language)?.toLowerCase();
+      const language = normalizeLowercaseStringOrEmpty(trimToUndefined(params.language));
       const latencyTier = asFiniteNumber(params.latencyTier);
       const voiceSettings = {
         ...(asFiniteNumber(params.speed) == null ? {} : { speed: asFiniteNumber(params.speed) }),

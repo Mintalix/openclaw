@@ -12,6 +12,7 @@
  * - On shutdown, cleans up registered commands via DELETE /api/v4/commands/{id}
  */
 
+import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import type { MattermostClient } from "./client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -139,7 +140,7 @@ export const DEFAULT_COMMAND_SPECS: MattermostCommandSpec[] = [
     originalName: "model",
     description: "View or change the current model",
     autoComplete: true,
-    autoCompleteHint: "[model-name]",
+    autoCompleteHint: "[model-name] [--runtime runtime]",
   },
   {
     trigger: "oc_models",
@@ -521,7 +522,7 @@ export function resolveSlashCommandConfig(
     native: raw?.native ?? "auto",
     nativeSkills: raw?.nativeSkills ?? "auto",
     callbackPath: normalizeCallbackPath(raw?.callbackPath ?? DEFAULT_CALLBACK_PATH),
-    callbackUrl: raw?.callbackUrl?.trim() || undefined,
+    callbackUrl: normalizeOptionalString(raw?.callbackUrl),
   };
 }
 

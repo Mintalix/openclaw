@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const emitCliBannerMock = vi.hoisted(() => vi.fn());
 const ensureConfigReadyMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -41,15 +41,17 @@ describe("tryRouteCli", () => {
   let originalHideBanner: string | undefined;
   let originalForceStderr: boolean;
 
-  beforeEach(async () => {
+  beforeAll(async () => {
+    ({ tryRouteCli } = await import("./route.js"));
+    ({ loggingState } = await import("../logging/state.js"));
+  });
+
+  beforeEach(() => {
     vi.clearAllMocks();
     originalDisableRouteFirst = process.env.OPENCLAW_DISABLE_ROUTE_FIRST;
     originalHideBanner = process.env.OPENCLAW_HIDE_BANNER;
     delete process.env.OPENCLAW_DISABLE_ROUTE_FIRST;
     delete process.env.OPENCLAW_HIDE_BANNER;
-    vi.resetModules();
-    ({ tryRouteCli } = await import("./route.js"));
-    ({ loggingState } = await import("../logging/state.js"));
     originalForceStderr = loggingState.forceConsoleToStderr;
     loggingState.forceConsoleToStderr = false;
     findRoutedCommandMock.mockReturnValue({
@@ -134,7 +136,10 @@ describe("tryRouteCli", () => {
       true,
     );
 
-    expect(findRoutedCommandMock).toHaveBeenCalledWith(["status"]);
+    expect(findRoutedCommandMock).toHaveBeenCalledWith(
+      ["status"],
+      ["node", "openclaw", "--log-level", "debug", "status"],
+    );
     expect(ensureConfigReadyMock).toHaveBeenCalledWith({
       runtime: expect.any(Object),
       commandPath: ["status"],
@@ -148,5 +153,19 @@ describe("tryRouteCli", () => {
     await expect(tryRouteCli(["node", "openclaw", "status"])).resolves.toBe(true);
 
     expect(emitCliBannerMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back before bootstrap when the route cannot parse the argv", async () => {
+    findRoutedCommandMock.mockReturnValue({
+      canRun: () => false,
+      loadPlugins: true,
+      run: runRouteMock,
+    });
+
+    await expect(tryRouteCli(["node", "openclaw", "tasks", "list"])).resolves.toBe(false);
+
+    expect(ensureConfigReadyMock).not.toHaveBeenCalled();
+    expect(ensurePluginRegistryLoadedMock).not.toHaveBeenCalled();
+    expect(runRouteMock).not.toHaveBeenCalled();
   });
 });

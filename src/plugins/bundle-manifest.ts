@@ -2,10 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import JSON5 from "json5";
 import { matchBoundaryFileOpenFailure, openBoundaryFileSync } from "../infra/boundary-file-read.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "../shared/string-coerce.js";
 import { isRecord } from "../utils.js";
+import type { PluginBundleFormat } from "./manifest-types.js";
 import { DEFAULT_PLUGIN_ENTRY_CANDIDATES, PLUGIN_MANIFEST_FILENAME } from "./manifest.js";
-import type { PluginBundleFormat } from "./types.js";
 
 export const CODEX_BUNDLE_MANIFEST_RELATIVE_PATH = ".codex-plugin/plugin.json";
 export const CLAUDE_BUNDLE_MANIFEST_RELATIVE_PATH = ".claude-plugin/plugin.json";
@@ -40,7 +43,9 @@ function normalizePathList(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.map((entry) => (typeof entry === "string" ? entry.trim() : "")).filter(Boolean);
+  return value
+    .map((entry) => normalizeOptionalString(entry))
+    .filter((entry): entry is string => Boolean(entry));
 }
 
 export function normalizeBundlePathList(value: unknown): string[] {
@@ -77,7 +82,7 @@ function hasInlineCapabilityValue(value: unknown): boolean {
 
 function slugifyPluginId(raw: string | undefined, rootDir: string): string {
   const fallback = path.basename(rootDir);
-  const source = (raw?.trim() || fallback).toLowerCase();
+  const source = normalizeLowercaseStringOrEmpty(raw) || normalizeLowercaseStringOrEmpty(fallback);
   const slug = source
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/-+/g, "-")
@@ -87,6 +92,7 @@ function slugifyPluginId(raw: string | undefined, rootDir: string): string {
 
 function loadBundleManifestFile(params: {
   rootDir: string;
+  rootRealPath?: string;
   manifestRelativePath: string;
   rejectHardlinks: boolean;
   allowMissing?: boolean;
@@ -95,6 +101,7 @@ function loadBundleManifestFile(params: {
   const opened = openBoundaryFileSync({
     absolutePath: manifestPath,
     rootPath: params.rootDir,
+    ...(params.rootRealPath !== undefined ? { rootRealPath: params.rootRealPath } : {}),
     boundaryLabel: "plugin root",
     rejectHardlinks: params.rejectHardlinks,
   });
@@ -322,6 +329,7 @@ function buildCursorCapabilities(raw: Record<string, unknown>, rootDir: string):
 
 export function loadBundleManifest(params: {
   rootDir: string;
+  rootRealPath?: string;
   bundleFormat: PluginBundleFormat;
   rejectHardlinks?: boolean;
 }): BundleManifestLoadResult {
@@ -334,6 +342,7 @@ export function loadBundleManifest(params: {
         : CLAUDE_BUNDLE_MANIFEST_RELATIVE_PATH;
   const loaded = loadBundleManifestFile({
     rootDir: params.rootDir,
+    ...(params.rootRealPath !== undefined ? { rootRealPath: params.rootRealPath } : {}),
     manifestRelativePath,
     rejectHardlinks,
     allowMissing: params.bundleFormat === "claude",
